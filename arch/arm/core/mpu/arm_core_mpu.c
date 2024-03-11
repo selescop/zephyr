@@ -62,6 +62,10 @@ extern char __ram_text_reloc_start[];
 extern char __ram_text_reloc_size[];
 #endif
 
+#if defined(CONFIG_LLEXT)
+extern char kheap_llext_heap[];
+#endif
+
 static const struct z_arm_mpu_partition static_regions[] = {
 #if defined(CONFIG_COVERAGE_GCOV) && defined(CONFIG_USERSPACE)
 		{
@@ -112,6 +116,14 @@ static const struct z_arm_mpu_partition static_regions[] = {
 			.attr = K_MEM_PARTITION_P_RO_U_NA,
 		},
 #endif /* !CONFIG_MULTITHREADING && CONFIG_MPU_STACK_GUARD */
+#if defined(CONFIG_LLEXT)
+		{
+		/* RAM area for relocated text */
+		.start = (uint32_t)&kheap_llext_heap,
+		.size = (uint32_t)(CONFIG_LLEXT_HEAP_SIZE * 1024),
+		.attr = K_MEM_PARTITION_P_RWX_U_RWX,
+		},
+#endif
 };
 
 /**
