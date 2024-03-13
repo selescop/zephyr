@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2023 Intel Corporation
+ * Copyright (c) 2024 Schneider Electric
  *
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -24,7 +25,60 @@ LOG_MODULE_REGISTER(llext, CONFIG_LLEXT_LOG_LEVEL);
 #define LLEXT_PAGE_SIZE 32
 #endif
 
-K_HEAP_DEFINE(llext_heap, CONFIG_LLEXT_HEAP_SIZE * 1024);
+#ifdef CONFIG_MMU_PAGE_SIZE
+#define LLEXT_PAGE_SIZE CONFIG_MMU_PAGE_SIZE
+#else
+/* Arm's MPU wants a 32 byte minimum mpu region */
+#define LLEXT_PAGE_SIZE 32
+#endif
+
+/**
+ * @brief Define a static k_heap in the specified linker section
+ *
+ * This macro defines and initializes a static memory region and
+ * k_heap of the requested size in the specified linker section.
+ * After kernel start, &name can be used as if k_heap_init() had
+ * been called.
+ *
+ * Note that this macro enforces a minimum size on the memory region
+ * to accommodate metadata requirements.  Very small heaps will be
+ * padded to fit.
+ *
+ * @param name Symbol name for the struct k_heap object
+ * @param bytes Size of memory region, in bytes
+ * @param in_section __attribute__((section(name))
+ */
+#define Z_HEAP_DEFINE_IN_SECT_MPU_ALIGNED(name, bytes, in_section)		\
+	char in_section						\
+	     __aligned(MAX(8, MAX(bytes, Z_HEAP_MIN_SIZE))) /* CHUNK_UNIT */			\
+	     kheap_##name[MAX(bytes, Z_HEAP_MIN_SIZE)];		\
+	STRUCT_SECTION_ITERABLE(k_heap, name) = {		\
+		.heap = {					\
+			.init_mem = kheap_##name,		\
+			.init_bytes = MAX(bytes, Z_HEAP_MIN_SIZE), \
+		 },						\
+	}
+
+/**
+ * @brief Define a static k_heap
+ *
+ * This macro defines and initializes a static memory region and
+ * k_heap of the requested size.  After kernel start, &name can be
+ * used as if k_heap_init() had been called.
+ *
+ * Note that this macro enforces a minimum size on the memory region
+ * to accommodate metadata requirements.  Very small heaps will be
+ * padded to fit.
+ *
+ * @param name Symbol name for the struct k_heap object
+ * @param bytes Size of memory region, in bytes
+ */
+#define K_HEAP_DEFINE_MPU_ALIGNED(name, bytes)				\
+	Z_HEAP_DEFINE_IN_SECT_MPU_ALIGNED(name, bytes,			\
+			      __noinit_named(kheap_buf_##name))
+
+
+K_HEAP_DEFINE_MPU_ALIGNED(llext_heap, CONFIG_LLEXT_HEAP_SIZE * 1024);
 
 static const char ELF_MAGIC[] = {0x7f, 'E', 'L', 'F'};
 
@@ -246,6 +300,10 @@ static int llext_map_sections(struct llext_loader *ldr, struct llext *ext)
 			mem_idx = LLEXT_MEM_BSS;
 		} else if (strcmp(name, ".exported_sym") == 0) {
 			mem_idx = LLEXT_MEM_EXPORT;
+		} else if (strcmp(name, ".got") == 0) {
+			mem_idx = LLEXT_MEM_GOT;
+		} else if (strcmp(name, ".plt") == 0) {
+			mem_idx = LLEXT_MEM_PLT;
 		} else {
 			LOG_DBG("Not copied section %s", name);
 			continue;
@@ -294,6 +352,7 @@ static int llext_copy_section(struct llext_loader *ldr, struct llext *ext,
 			      enum llext_mem mem_idx)
 {
 	int ret;
+	void *pmem = NULL;
 
 	if (!ldr->sects[mem_idx].sh_size) {
 		return 0;
@@ -327,39 +386,61 @@ static int llext_copy_section(struct llext_loader *ldr, struct llext *ext,
 	uintptr_t sect_align = sect_alloc;
 #endif
 
+	if( ldr->phdr.p_memsz != 0) {
+		/*
+			For this case, enum LLEXT_MEM_COUNT must be in same order as section in elf file to preserve relative addr
+		*/
+		pmem = (uint8_t*)ext->mem[LLEXT_MEM_TEXT] + ldr->sects[mem_idx].sh_addr;
+		ext->mem[mem_idx] = pmem;
+		ext->mem_on_heap[mem_idx] = false;
+	} else {
+		// llext_heap                        : llext memory pool
+		// ldr->sects[mem_idx].sh_addralign : section alignment
+		// ldr->sects[mem_idx].sh_size      : section size
+		if(sect_align < ldr->sects[mem_idx].sh_addralign) {
+			LOG_WRN("alloc Alignment smaller than ELF section aligment needed for %d", mem_idx);
+		}
 	ext->mem[mem_idx] = k_heap_aligned_alloc(&llext_heap, sect_align,
 						 sect_alloc,
 						 K_NO_WAIT);
+
 
 	if (!ext->mem[mem_idx]) {
 		return -ENOMEM;
 	}
 
+		ext->mem_on_heap[mem_idx] = true;
 	ext->alloc_size += sect_alloc;
+		pmem = ext->mem[mem_idx];
 
 	llext_init_mem_part(ext, mem_idx, (uintptr_t)ext->mem[mem_idx],
 		sect_alloc);
+	}
 
-	if (ldr->sects[mem_idx].sh_type == SHT_NOBITS) {
-		memset(ext->mem[mem_idx], 0, ldr->sects[mem_idx].sh_size);
-	} else {
+	/* copy data */
+	if( ldr->sects[mem_idx].sh_type & SHT_PROGBITS )
+	{
 		ret = llext_seek(ldr, ldr->sects[mem_idx].sh_offset);
 		if (ret != 0) {
 			goto err;
 		}
 
-		ret = llext_read(ldr, ext->mem[mem_idx], ldr->sects[mem_idx].sh_size);
+		ret = llext_read(ldr, pmem, ldr->sects[mem_idx].sh_size);
 		if (ret != 0) {
 			goto err;
 		}
 	}
-
-	ext->mem_on_heap[mem_idx] = true;
-
+	else
+	{
+		/* zero initialized */
+		memset(pmem, 0, ldr->sects[mem_idx].sh_size);
+	}
 	return 0;
 
 err:
+	if (ext->mem_on_heap[mem_idx]) 	{
 	k_heap_free(&llext_heap, ext->mem[mem_idx]);
+	}
 	return ret;
 }
 
@@ -376,13 +457,79 @@ static int llext_copy_strings(struct llext_loader *ldr, struct llext *ext)
 
 static int llext_copy_sections(struct llext_loader *ldr, struct llext *ext)
 {
+	int ret;
+
+	/* use first program header to allocate all section in one buffer*/
+	if( ldr->hdr.e_phnum > 0) {
+		/* Manage program headers (shared link) */
+		size_t pos = ldr->hdr.e_phoff;
+
+		ret = llext_seek(ldr, pos);
+		if (ret != 0) {
+			LOG_ERR("failed seeking to position %u\n", pos);
+			return ret;
+		}
+		/* read program header */
+		ret = llext_read(ldr, &ldr->phdr, sizeof(elf_phdr_t));
+		if (ret != 0) {
+			LOG_ERR("failed reading section header at position %u\n", pos);
+			return ret;
+		}
+		pos += ldr->hdr.e_phentsize;
+
+		/* alloc mem
+		   llext_heap        : llext memory pool
+		   ldr->phdr.p_align : segment alignment
+		   ldr->phdr.p_memsz : segment size */
+		#ifndef CONFIG_ARM_MPU
+			const uintptr_t sect_alloc = ROUND_UP(ldr->sects[LLEXT_MEM_TEXT].sh_size, LLEXT_PAGE_SIZE);
+			const uintptr_t sect_align = LLEXT_PAGE_SIZE;
+		#else
+			uintptr_t sect_alloc = LLEXT_PAGE_SIZE;
+
+			while (sect_alloc < ldr->sects[LLEXT_MEM_TEXT].sh_size) {
+				sect_alloc *= 2;
+			}
+			uintptr_t sect_align = sect_alloc;
+		#endif
+
+		if(sect_align < ldr->phdr.p_align) {
+			LOG_WRN("alloc Alignment smaller than ELF segment aligment needed");
+		}
+
+		ext->mem[LLEXT_MEM_TEXT] =
+					k_heap_aligned_alloc(&llext_heap, sect_align,
+								sect_alloc,
+								K_NO_WAIT);
+
+		if (ext->mem[LLEXT_MEM_TEXT] == NULL) {
+			ret = -ENOMEM;
+			return ret;
+		}
+
+		llext_init_mem_part(ext, LLEXT_MEM_TEXT, (uintptr_t)ext->mem[LLEXT_MEM_TEXT],
+		sect_alloc);
+
+		/* copy text section */
+		ret = llext_copy_section(ldr, ext, LLEXT_MEM_TEXT);
+
+		if (ret < 0) {
+			return ret;
+		}
+	}
+
+	/* copy all section */
 	for (enum llext_mem mem_idx = 0; mem_idx < LLEXT_MEM_COUNT; mem_idx++) {
 		/* strings have already been copied */
 		if (ext->mem[mem_idx]) {
 			continue;
 		}
+		/* symtab section is managed before */
+		if( LLEXT_MEM_SYMTAB == mem_idx) {
+			continue;
+		}
 
-		int ret = llext_copy_section(ldr, ext, mem_idx);
+		ret = llext_copy_section(ldr, ext, mem_idx);
 
 		if (ret < 0) {
 			return ret;
@@ -464,6 +611,7 @@ static int llext_export_symbols(struct llext_loader *ldr, struct llext *ext)
 
 	if (shdr->sh_size < sizeof(struct llext_symbol)) {
 		/* Not found, no symbols exported */
+		LOG_WRN("No symbols exported");
 		return 0;
 	}
 
@@ -517,14 +665,13 @@ static int llext_copy_symbols(struct llext_loader *ldr, struct llext *ext)
 
 		uint32_t stt = ELF_ST_TYPE(sym.st_info);
 		uint32_t stb = ELF_ST_BIND(sym.st_info);
-		unsigned int sect = sym.st_shndx;
+		uint32_t sect = sym.st_shndx;
 
-		if (stt == STT_FUNC && stb == STB_GLOBAL && sect != SHN_UNDEF) {
 			enum llext_mem mem_idx = ldr->sect_map[sect];
 			const char *name = llext_string(ldr, ext, LLEXT_MEM_STRTAB, sym.st_name);
-
+		if(NULL != name) {
+			if ((stt == STT_FUNC && stb == STB_GLOBAL && sect != SHN_UNDEF && sect != SHN_ABS && sect != SHN_COMMON) ) {
 			__ASSERT(j <= sym_tab->sym_cnt, "Miscalculated symbol number %u\n", j);
-
 			sym_tab->syms[j].name = name;
 			sym_tab->syms[j].addr = (void *)((uintptr_t)ext->mem[mem_idx] +
 							 sym.st_value -
@@ -534,6 +681,7 @@ static int llext_copy_symbols(struct llext_loader *ldr, struct llext *ext)
 				j, name, sym_tab->syms[j].addr);
 			j++;
 		}
+	}
 	}
 
 	return 0;
@@ -660,8 +808,11 @@ static void llext_link_plt(struct llext_loader *ldr, struct llext *ext,
 	}
 }
 
-__weak void arch_elf_relocate(elf_rela_t *rel, uintptr_t opaddr, uintptr_t opval)
+__weak int32_t arch_elf_relocate(elf_rela_t *rel, uint32_t rel_index,
+			uintptr_t loc, uintptr_t sym_base_addr, const char *symname,
+			uintptr_t load_bias)
 {
+	return 0;
 }
 
 static int llext_link(struct llext_loader *ldr, struct llext *ext, bool do_local)
@@ -715,6 +866,9 @@ static int llext_link(struct llext_loader *ldr, struct llext *ext, bool do_local
 			   strcmp(name, ".rela.dyn") == 0) {
 			llext_link_plt(ldr, ext, &shdr, do_local);
 			continue;
+		} else if (strcmp(name, ".rel.dyn") == 0) {
+			// we assume that first load segment starts at MEM_TEXT
+			loc = (uintptr_t)ext->mem[LLEXT_MEM_TEXT];
 		}
 
 		LOG_DBG("relocation section %s (%d) linked to section %d has %d relocations",
@@ -756,6 +910,10 @@ static int llext_link(struct llext_loader *ldr, struct llext *ext, bool do_local
 
 			op_loc = loc + rel.r_offset;
 
+			if(ELF_R_SYM(rel.r_info) == 0) {
+				/* no symbol ex: R_ARM_V4BX relocation, R_ARM_RELATIVE  */
+				link_addr = 0;
+			} else
 			/* If symbol is undefined, then we need to look it up */
 			if (sym.st_shndx == SHN_UNDEF) {
 				link_addr = (uintptr_t)llext_find_sym(NULL, name);
@@ -765,18 +923,12 @@ static int llext_link(struct llext_loader *ldr, struct llext *ext, bool do_local
 						"symbol table %s, offset %d, link section %d",
 						name, rel.r_offset, shdr.sh_link);
 					return -ENODATA;
+				} else {
+					LOG_INF("found symbol %s at 0x%lx",
+						name, link_addr);
 				}
-			} else if (ELF_ST_TYPE(sym.st_info) == STT_SECTION ||
-				   ELF_ST_TYPE(sym.st_info) == STT_FUNC) {
-				/* Current relocation location holds an offset into the section */
-				link_addr = (uintptr_t)ext->mem[ldr->sect_map[sym.st_shndx]]
-					+ sym.st_value
-					+ *((uintptr_t *)op_loc);
-
-				LOG_INF("found section symbol %s addr 0x%lx", name, link_addr);
 			} else {
-				/* Nothing to relocate here */
-				continue;
+				link_addr = (uintptr_t)ext->mem[ldr->sect_map[sym.st_shndx]] + sym.st_value;
 			}
 
 			LOG_INF("relocating (linking) symbol %s type %d binding %d ndx %d offset "
@@ -790,7 +942,11 @@ static int llext_link(struct llext_loader *ldr, struct llext *ext, bool do_local
 				op_loc, link_addr);
 
 			/* relocation */
-			arch_elf_relocate(&rel, op_loc, link_addr);
+			ret = arch_elf_relocate(&rel, j, op_loc, link_addr, name,
+					     (uintptr_t)ext->mem[LLEXT_MEM_TEXT]);
+			if (ret != 0) {
+				return ret;
+			}
 		}
 	}
 
@@ -1067,3 +1223,11 @@ int llext_add_domain(struct llext *ext, struct k_mem_domain *domain)
 	return -ENOSYS;
 #endif
 }
+
+#if CONFIG_LLEXT_HEAP_STAT
+void llext_print_heap_info()
+{
+	bool dump_chunks = true;
+	sys_heap_print_info(&llext_heap.heap, dump_chunks);
+}
+#endif
