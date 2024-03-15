@@ -8,6 +8,7 @@
 #include <zephyr/llext/elf.h>
 #include <zephyr/llext/llext.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/util.h>
 
 LOG_MODULE_REGISTER(elf, CONFIG_LLEXT_LOG_LEVEL);
 
@@ -32,26 +33,22 @@ static inline uint32_t opcode_identity32(uintptr_t x)
 	return *(uint32_t *)x;
 }
 
-static inline int32_t sign_extend32(uint32_t value, int index)
-{
-	int8_t shift = 31 - index;
-	return (int32_t)(value << shift) >> shift;
-}
 
 static int decode_prel31(uint32_t rel_index, elf_word reloc_type, uint32_t loc,
 				uint32_t sym_base_addr, const char *symname, int32_t *offset)
 {
 	int ret;
 
-	*offset = (*(int32_t *)loc << 1) >> 1; /* sign extend */
+	//*offset = (*(int32_t *)loc << 1) >> 1; /* sign extend */
+	*offset = sign_extend(*(int32_t *)loc, 30);
 	*offset += sym_base_addr - loc;
 	if (*offset >= PREL31_UPPER_BOUNDARY || *offset < PREL31_LOWER_BOUNDARY) {
 		LOG_ERR("sym '%s': relocation %u out of range (%#x -> %#x)\n",
 			symname, rel_index, loc, sym_base_addr);
 		ret = -ENOEXEC;
 	} else {
-		*(uint32_t *)loc &= 0x80000000;
-		*(uint32_t *)loc |= *offset & 0x7fffffff;
+		*(uint32_t *)loc &= BIT(31);
+		*(uint32_t *)loc |= *offset & GENMASK(30,0);
 
 		ret = 0;
 	}
@@ -59,14 +56,19 @@ static int decode_prel31(uint32_t rel_index, elf_word reloc_type, uint32_t loc,
 	return ret;
 }
 
+#define MASK_BRANCH_Cond    GENMASK(31,28)
+#define MASK_BRANCH_101     GENMASK(27,25)
+#define MASK_BRANCH_L       BIT(24)
+#define MASK_BRANCH_Offset  GENMASK(23,0)
+
 static int decode_jumps(uint32_t rel_index, elf_word reloc_type, uint32_t loc,
 				uint32_t sym_base_addr, const char *symname, int32_t *offset)
 {
     int ret;
 
 	*offset = MEM2ARMOPCODE(*(uint32_t *)loc);
-	*offset = (*offset & 0x00ffffff) << 2;
-	*offset = sign_extend32(*offset, 25);
+	*offset = (*offset & MASK_BRANCH_Offset) << 2;
+	*offset = sign_extend(*offset, 25);
 	*offset += sym_base_addr - loc;
 	if (*offset <= JUMP_UPPER_BOUNDARY || *offset >= JUMP_LOWER_BOUNDARY) {
 		LOG_ERR("sym '%s': relocation %u out of range (%#x -> %#x)\n",
@@ -74,9 +76,9 @@ static int decode_jumps(uint32_t rel_index, elf_word reloc_type, uint32_t loc,
 		ret = -ENOEXEC;
 	} else {
 		*offset >>= 2;
-		*offset &= 0x00ffffff;
+		*offset &= MASK_BRANCH_Offset;
 
-		*(uint32_t *)loc &= OPCODE2ARMMEM(0xff000000);
+		*(uint32_t *)loc &= OPCODE2ARMMEM(MASK_BRANCH_Cond|MASK_BRANCH_101|MASK_BRANCH_L);
 		*(uint32_t *)loc |= OPCODE2ARMMEM(*offset);
 
 		ret = 0;
@@ -85,14 +87,23 @@ static int decode_jumps(uint32_t rel_index, elf_word reloc_type, uint32_t loc,
     return ret;
 }
 
+#define MASK_MOV_Cond       GENMASK(31,28)
+#define MASK_MOV_00         GENMASK(27,26)
+#define MASK_MOV_I          BIT(25)
+#define MASK_MOV_OpCode     GENMASK(24,21)
+#define MASK_MOV_S          BIT(20)
+#define MASK_MOV_Rn         GENMASK(19,16)
+#define MASK_MOV_Rd         GENMASK(15,12)
+#define MASK_MOV_Operand2   GENMASK(11,0)
+
 static void decode_mov(uint32_t rel_index, elf_word reloc_type, uint32_t loc,
 			uint32_t sym_base_addr, const char *symname, int32_t *offset)
 {
 	uint32_t tmp;
 
 	*offset = tmp = MEM2ARMOPCODE(*(uint32_t *)loc);
-	*offset = ((*offset & 0xf0000) >> 4) | (*offset & 0xfff);
-	*offset = sign_extend32(*offset, 15);
+	*offset = ((*offset & MASK_MOV_Rn ) >> 4) | (*offset & MASK_MOV_Operand2 );
+	*offset = sign_extend(*offset, 15);
 
 	*offset += sym_base_addr;
 	if (reloc_type == R_ARM_MOVT_PREL || reloc_type == R_ARM_MOVW_PREL_NC) {
@@ -102,12 +113,25 @@ static void decode_mov(uint32_t rel_index, elf_word reloc_type, uint32_t loc,
 		*offset >>= 16;
 	}
 
-	tmp &= 0xfff0f000;
-	tmp |= ((*offset & 0xf000) << 4) |
-	(*offset & 0x0fff);
+	tmp &= (MASK_MOV_Cond | MASK_MOV_00 | MASK_MOV_I | MASK_MOV_OpCode | MASK_MOV_Rd );
+	tmp |= ((*offset & MASK_MOV_Rd) << 4) |
+	(*offset & (MASK_MOV_Rd|MASK_MOV_Operand2));
 
 	*(uint32_t *)loc = OPCODE2ARMMEM(tmp);
 }
+
+#define BIT_THUMB_BW_S        10
+#define MASK_THUMB_BW_11110   GENMASK(15,11)
+#define MASK_THUMB_BW_S       BIT(10)
+#define MASK_THUMB_BW_imm10   GENMASK(9,0)
+
+#define BIT_THUMB_BL_J1       13
+#define BIT_THUMB_BL_J2       11
+#define MASK_THUMB_BL_10      GENMASK(15,14)
+#define MASK_THUMB_BL_J1      BIT(13)
+#define MASK_THUMB_BL_1       BIT(12)
+#define MASK_THUMB_BL_J2      BIT(11)
+#define MASK_THUMB_BL_imm11   GENMASK(10,0)
 
 static int decode_thm_jumps(uint32_t rel_index, elf_word reloc_type, uint32_t loc,
 			uint32_t sym_base_addr, const char *symname, int32_t *offset)
@@ -127,26 +151,15 @@ static int decode_thm_jumps(uint32_t rel_index, elf_word reloc_type, uint32_t lo
 	upper = MEM2THM16OPCODE(*(uint16_t *)loc);
 	lower = MEM2THM16OPCODE(*(uint16_t *)(loc + 2));
 
-	/**
-	 * 25 bit signed address range (Thumb-2 BL and B.W instructions):
-	 *   S:I1:I2:imm10:imm11:0
-	 * where:
-	 *   S     = upper[10]   = offset[24]
-	 *   I1    = ~(J1 ^ S)   = offset[23]
-	 *   I2    = ~(J2 ^ S)   = offset[22]
-	 *   imm10 = upper[9:0]  = offset[21:12]
-	 *   imm11 = lower[10:0] = offset[11:1]
-	 *   J1    = lower[13]
-	 *   J2    = lower[11]
-	 */
-	sign = (upper >> 10) & 1;
-	j1 = (lower >> 13) & 1;
-	j2 = (lower >> 11) & 1;
+	/* sign is bit10 */
+	sign = (upper >> BIT_THUMB_BW_S) & 1;
+	j1 = (lower >> BIT_THUMB_BL_J1) & 1;
+	j2 = (lower >> BIT_THUMB_BL_J2) & 1;
 	*offset = (sign << 24) | ((~(j1 ^ sign) & 1) << 23) |
 		((~(j2 ^ sign) & 1) << 22) |
-		((upper & 0x03ff) << 12) |
-		((lower & 0x07ff) << 1);
-	*offset = sign_extend32(*offset, 24);
+		((upper & MASK_THUMB_BW_imm10) << 12) |
+		((lower & MASK_THUMB_BL_imm11) << 1);
+	*offset = sign_extend(*offset, 24);
 	*offset += sym_base_addr - loc;
 
 	if (*offset <= THM_JUMP_UPPER_BOUNDARY || *offset >= THM_JUMP_LOWER_BOUNDARY) {
@@ -157,11 +170,11 @@ static int decode_thm_jumps(uint32_t rel_index, elf_word reloc_type, uint32_t lo
 		sign = (*offset >> 24) & 1;
 		j1 = sign ^ (~(*offset >> 23) & 1);
 		j2 = sign ^ (~(*offset >> 22) & 1);
-		upper = (uint16_t)((upper & 0xf800) | (sign << 10) |
-					((*offset >> 12) & 0x03ff));
-		lower = (uint16_t)((lower & 0xd000) |
-				(j1 << 13) | (j2 << 11) |
-				((*offset >> 1) & 0x07ff));
+		upper = (uint16_t)((upper & MASK_THUMB_BW_11110) | (sign << BIT_THUMB_BW_S) |
+					((*offset >> 12) & MASK_THUMB_BW_imm10));
+		lower = (uint16_t)((lower & (MASK_THUMB_BL_10|MASK_THUMB_BL_1)) |
+				(j1 << BIT_THUMB_BL_J1) | (j2 << BIT_THUMB_BL_J2) |
+				((*offset >> 1) & MASK_THUMB_BL_imm11));
 	
 		*(uint16_t *)loc = OPCODE2THM16MEM(upper);
 		*(uint16_t *)(loc + 2) = OPCODE2THM16MEM(lower);
@@ -170,6 +183,17 @@ static int decode_thm_jumps(uint32_t rel_index, elf_word reloc_type, uint32_t lo
 
 	return ret;
 }
+
+#define MASK_THUMB_MOV_11110     GENMASK(15,11)
+#define MASK_THUMB_MOV_i         BIT(10)
+#define MASK_THUMB_MOV_100100    GENMASK(9,4)
+#define MASK_THUMB_MOV_imm4      GENMASK(3,0)
+
+#define MASK_THUMB_MOV_0         BIT(15)
+#define MASK_THUMB_MOV_imm3      GENMASK(14,12)
+#define MASK_THUMB_MOV_Rd        GENMASK(11,8)
+#define MASK_THUMB_MOV_imm8      GENMASK(7,0)
+
 
 static void decode_thm_mov(uint32_t rel_index, elf_word reloc_type, uint32_t loc,
 			uint32_t sym_base_addr, const char *symname, int32_t *offset)
@@ -180,19 +204,12 @@ static void decode_thm_mov(uint32_t rel_index, elf_word reloc_type, uint32_t loc
 	lower = MEM2THM16OPCODE(*(uint16_t *)(loc + 2));
 
 	/**
-	 * MOVT/MOVW instructions encoding in Thumb-2:
-	 *
-	 * i	= upper[10]
-	 * imm4	= upper[3:0]
-	 * imm3	= lower[14:12]
-	 * imm8	= lower[7:0]
-	 *
-	 * imm16 = imm4:i:imm3:imm8
+	 * MOVT/MOVW instructions encoding in Thumb-2
 	 */
-	*offset = ((upper & 0x000f) << 12) |
-		((upper & 0x0400) << 1) |
-		((lower & 0x7000) >> 4) | (lower & 0x00ff);
-	*offset = sign_extend32(*offset, 15);
+	*offset = ((upper & MASK_THUMB_MOV_imm4) << 12) |
+		((upper & MASK_THUMB_MOV_i) << 1) |
+		((lower & MASK_THUMB_MOV_imm3) >> 4) | (lower & MASK_THUMB_MOV_imm8);
+	*offset = sign_extend(*offset, 15);
 	*offset += sym_base_addr;
 
 	if (reloc_type == R_ARM_THM_MOVT_PREL || reloc_type == R_ARM_THM_MOVW_PREL_NC) {
@@ -202,12 +219,12 @@ static void decode_thm_mov(uint32_t rel_index, elf_word reloc_type, uint32_t loc
 		*offset >>= 16;
 	}
 
-	upper = (uint16_t)((upper & 0xfbf0) |
-			((*offset & 0xf000) >> 12) |
-			((*offset & 0x0800) >> 1));
-	lower = (uint16_t)((lower & 0x8f00) |
-			((*offset & 0x0700) << 4) |
-			(*offset & 0x00ff));
+	upper = (uint16_t)((upper & (MASK_THUMB_MOV_11110|MASK_THUMB_MOV_100100)) |
+			((*offset & (MASK_THUMB_MOV_imm4<<12)) >> 12) |
+			((*offset & (MASK_THUMB_MOV_i<<1)) >> 1));
+	lower = (uint16_t)((lower & (MASK_THUMB_MOV_0|MASK_THUMB_MOV_Rd)) |
+			((*offset & MASK_THUMB_MOV_imm3) << 4) |
+			(*offset & MASK_THUMB_MOV_imm8));
 	*(uint16_t *)loc = OPCODE2THM16MEM(upper);
 	*(uint16_t *)(loc + 2) = OPCODE2THM16MEM(lower);
 }
