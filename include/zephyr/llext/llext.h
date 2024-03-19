@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2023 Intel Corporation
+ * Copyright (c) 2024 Schneider Electric
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -199,12 +200,15 @@ int llext_add_domain(struct llext *ext, struct k_mem_domain *domain);
  * the actual placement of some symbolic data such as a section, function,
  * or object.
  *
- * @param[in] rel Relocation data provided by elf
- * @param[in] opaddr Address of operation to rewrite with relocation
- * @param[in] opval Value of looked up symbol to relocate
+ * @param[in] rel_index Index of relocation
+ * @param[in] loc Address of operation to rewrite with relocation
+ * @param[in] sym_base_addr Symbol address
+ * @param[in] symname Symbol name
+ * @param[in] load_bias .text load address
+ * @retval -ENOEXEC invalid relocation
  */
-void arch_elf_relocate(elf_rela_t *rel, uintptr_t opaddr, uintptr_t opval);
-
+int32_t arch_elf_relocate(elf_rela_t *rel, uint32_t rel_index, uintptr_t loc,
+			     uintptr_t sym_base_addr, const char *symname, uintptr_t load_bias);
 /**
  * @brief Find an ELF section
  *
