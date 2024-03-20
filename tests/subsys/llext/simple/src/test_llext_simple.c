@@ -157,6 +157,13 @@ static LLEXT_CONST uint8_t object_ext[] __aligned(4) = {
 };
 LLEXT_LOAD_UNLOAD(object, true)
 
+#if defined(CONFIG_ARM) && !defined(CONFIG_CPU_CORTEX_M0)
+static LLEXT_CONST uint8_t movwmovt_ext[] __aligned(4) = {
+	#include "movwmovt.inc"
+};
+LLEXT_LOAD_UNLOAD(movwmovt, true)
+#endif
+
 /*
  * Ensure that EXPORT_SYMBOL does indeed provide a symbol and a valid address
  * to it.
