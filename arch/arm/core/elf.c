@@ -70,14 +70,14 @@ LOG_MODULE_REGISTER(elf, CONFIG_LLEXT_LOG_LEVEL);
 #define SHIFT_THM_MOV_IMM3 4
 #define SHIFT_THM_MOV_IMM4 12
 
-static inline uint32_t opcode_identity16(uintptr_t x)
+static inline uint32_t opcode_identity16(uint16_t x)
 {
-	return *(uint16_t *)x;
+	return x;
 }
 
-static inline uint32_t opcode_identity32(uintptr_t x)
+static inline uint32_t opcode_identity32(uint32_t x)
 {
-	return *(uint32_t *)x;
+	return x;
 }
 
 static int decode_prel31(uint32_t rel_index, elf_word reloc_type, uint32_t loc,
