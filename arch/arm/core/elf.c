@@ -146,7 +146,7 @@ static void decode_movs(uint32_t rel_index, elf_word reloc_type, uint32_t loc,
 
 	tmp &= (MASK_MOV_COND | MASK_MOV_00 | MASK_MOV_I | MASK_MOV_OPCODE | MASK_MOV_RD);
 	tmp |= ((*offset & MASK_MOV_RD) << SHIFT_MOV_RD) |
-	(*offset & (MASK_MOV_RD|MASK_MOV_OPERAND2));
+	(*offset & (MASK_MOV_OPERAND2));
 
 	*(uint32_t *)loc = OPCODE2ARMMEM(tmp);
 }
@@ -228,7 +228,7 @@ static void decode_thm_movs(uint32_t rel_index, elf_word reloc_type, uint32_t lo
 			((*offset & (MASK_THM_MOV_IMM4<<SHIFT_THM_MOV_IMM4)) >> SHIFT_THM_MOV_IMM4) |
 			((*offset & (MASK_THM_MOV_I<<SHIFT_THM_MOV_I)) >> SHIFT_THM_MOV_I));
 	lower = (uint16_t)((lower & (MASK_THM_MOV_0|MASK_THM_MOV_RD)) |
-			((*offset & MASK_THM_MOV_IMM3) << SHIFT_THM_MOV_IMM3) |
+			((*offset & (MASK_THM_MOV_IMM3>>SHIFT_THM_MOV_IMM3)) << SHIFT_THM_MOV_IMM3) |
 			(*offset & MASK_THM_MOV_IMM8));
 	*(uint16_t *)loc = OPCODE2THM16MEM(upper);
 	*(uint16_t *)(loc + 2) = OPCODE2THM16MEM(lower);
