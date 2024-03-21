@@ -157,7 +157,7 @@ static LLEXT_CONST uint8_t object_ext[] __aligned(4) = {
 };
 LLEXT_LOAD_UNLOAD(object, true)
 
-#if defined(CONFIG_ARM) && !defined(CONFIG_CPU_CORTEX_M0)
+#if defined(CONFIG_ARM) && !defined(CONFIG_CPU_CORTEX_M0) && !defined(CONFIG_CPU_CORTEX_M0PLUS)
 static LLEXT_CONST uint8_t movwmovt_ext[] __aligned(4) = {
 	#include "movwmovt.inc"
 };

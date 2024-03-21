@@ -24,7 +24,7 @@ static void test_func()
 void test_entry(void)
 {
 	test_func();
-#if defined(CONFIG_ARM) && !defined(CONFIG_CPU_CORTEX_M0)
+#if defined(CONFIG_ARM) && !defined(CONFIG_CPU_CORTEX_M0) && !defined(CONFIG_CPU_CORTEX_M0PLUS)
 	printk("test movwmovt\n");
 	__asm volatile ("movw r0, #:lower16:test_func");
 	__asm volatile ("movt r0, #:upper16:test_func");
